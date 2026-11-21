@@ -110,6 +110,22 @@ Without a checkout, `tools/make-standalone.sh` builds a single self-extracting f
 Existing settings are never overwritten; new defaults appear as `*.new` next to them.
 An older flat layout (`~/bin/openskimmer`, `~/bin/skim.d`) is moved into the folder automatically.
 
+## Update
+
+The clone is only the source; the installation lives in `~/bin/airspyhf-cw-skimmer`. To get a
+new version of this repository:
+
+```sh
+cd ~/git/airspyhf-cw-skimmer
+git pull
+bash install.sh --files-only      # refresh the scripts, keep your settings
+```
+
+Your settings (`skim.d/skim.conf`, `devices.conf`, `bands.conf`) and the clock calibration are
+never overwritten. New defaults appear as `*.new` next to them. You can delete the clone at any
+time and clone it again later; the installation keeps working without it.
+`skim update` is different: it updates OpenSkimmer, MASTER.SCP and patt3ch.lst, not this repository.
+
 ## Use
 
 ```sh
