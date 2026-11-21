@@ -25,6 +25,55 @@ nothing of it is redistributed here.
 - **Receiver detection by serial number**: with a single HF+ attached you do not even have
   to name it.
 
+## How it fits together
+
+Signal chain. On HF the antenna goes straight into the receiver. On 2 m a bandpass filter
+(strong radio and TV transmitters) and a preamplifier come first.
+
+```mermaid
+flowchart LR
+    R["Airspy HF+<br/>192 kS/s I/Q"]
+    PC["Linux Mint PC<br/>OpenSkimmer"]
+
+    subgraph HF["HF: 10 / 15 / 20 m"]
+        A1["Antenna<br/>vertical, dipole,<br/>3 to 5 el. Yagi"]
+    end
+    subgraph VHF["2 m"]
+        direction LR
+        A2["Antenna<br/>dipole or<br/>4 el. Yagi"] --> F["Bandpass filter<br/>(strong radio and<br/>TV transmitters)"] --> P["Preamplifier<br/>DK4YJ / DL6MFI"]
+    end
+
+    A1 -->|"coax"| R
+    P -->|coax| R
+    R -->|USB| PC
+```
+
+Software and signals. `skim` reads the band, receiver and callsign settings and starts
+OpenSkimmer. `skim-cal` stores the clock error of each receiver. Spots leave OpenSkimmer as a
+telnet DX cluster (port 7300) and can be passed on to the RBN with the RBN Aggregator; the
+waterfall is served on port 7380.
+
+```mermaid
+flowchart LR
+    HF["Airspy HF+"] -->|"USB: I/Q"| LIB
+
+    subgraph PC["Linux Mint PC"]
+        direction TB
+        LIB["libairspyhf +<br/>SoapyAirspyHF<br/>(SoapySDR)"]
+        OS["OpenSkimmer<br/>FFT channelizer<br/>CW decoder<br/>MASTER.SCP / patt3ch.lst"]
+        CONF[("skim.d/<br/>bands.conf<br/>devices.conf<br/>skim.conf")]
+        SKIM["skim<br/>launcher"]
+        CAL["skim-cal"]
+        LIB --> OS
+        CONF --> SKIM -->|"center, rate, range,<br/>ppm offset, callsign"| OS
+        CAL -->|"ppm per receiver"| CONF
+    end
+
+    OS -->|"telnet :7300 (spots)"| AGG["RBN Aggregator"] -->|"HTTP POST"| RBN(("Reverse Beacon<br/>Network"))
+    OS -->|"http :7380"| WF["Waterfall<br/>in browser"]
+    WWV["WWV 10000 kHz<br/>RWM 9996 kHz"] -.->|"carrier lines,<br/>calibration only"| HF
+```
+
 ## Requirements
 
 - Linux Mint 22 / Ubuntu 24.04 or similar (Python 3.9+), sudo rights for the installation
