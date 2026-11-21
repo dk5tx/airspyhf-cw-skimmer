@@ -1,0 +1,8 @@
+dist/
+__pycache__/
+*.pyc
+*.c64
+# local settings and measurements never belong in the repository
+skim.conf
+devices.conf
+cal.log

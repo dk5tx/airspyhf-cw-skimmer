@@ -1,0 +1,12 @@
+# devices.conf - your Airspy HF+ receivers
+#
+# Columns:  name  serial  ppm  [callsign]
+#   name      free choice, used on the command line: skim 40m rx1
+#   serial    as printed by "skim list" (SoapySDRUtil --find="driver=airspyhf")
+#   ppm       clock error of this unit, "-" = not calibrated yet (0 is used)
+#             "skim-cal NAME" measures it and fills it in
+#   callsign  optional, overrides MY_CALL from skim.conf for this receiver
+#
+# "skim add NAME" registers the receiver that is plugged in. Example (fake serial):
+#
+# rx1   0123456789abcdef   -

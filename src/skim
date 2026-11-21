@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# skim - CW skimmer launcher for Airspy HF+ receivers (OpenSkimmer)
+# Part of airspyhf-cw-skimmer. Run "skim --help" for usage.
+set -u
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+BIN=${SELF%/*}
+CONF=$BIN/skim.d
+OSDIR=$BIN/openskimmer
+
+usage() {
+  cat <<'USAGE'
+usage: skim BAND [RECEIVER] [normal|contest] [openskimmer options]
+
+  skim 40m rx1                 40 m, "normal" window (CW segment only), receiver rx1
+  skim 2m rx2                  2 m with receiver rx2
+  skim 20m rx1 contest         "contest" window (CW plus a bit more, no digimode segments)
+  skim 40m                     no name: use the only HF+ that is plugged in
+  skim 40m rx1 --workers process
+                               everything from the first "-" option on goes to openskimmer
+
+  skim list                    attached and known receivers, bands
+  skim add NAME [SERIAL]       register an attached receiver under a name
+  skim update                  update OpenSkimmer, MASTER.SCP and patt3ch.lst
+  skim-cal RECEIVER            measure the receiver's clock error (WWV/RWM)
+
+Short form: skim-40m rx1, skim-2m rx2 contest, ...
+Settings: skim.d/skim.conf (callsign), skim.d/bands.conf, skim.d/devices.conf
+USAGE
+}
+
+die() { echo "skim: $*" >&2; exit 1; }
+conf_lines() { grep -Ev '^[[:space:]]*(#|$)' "$1" 2>/dev/null; }
+
+plugged_serials() {
+  command -v SoapySDRUtil >/dev/null 2>&1 || return 0
+  SoapySDRUtil --find="driver=airspyhf" 2>/dev/null \
+    | sed -n 's/^[[:space:]]*serial = *\([0-9A-Fa-f]\{6,\}\).*/\1/p' | tr 'A-F' 'a-f' | sort -u
+}
+dev_field() { conf_lines "$CONF/devices.conf" | awk -v n="$1" -v c="$2" '$1==n{print $c; exit}'; }
+dev_by_serial() { conf_lines "$CONF/devices.conf" | awk -v s="$(echo "$1" | tr 'A-F' 'a-f')" 'tolower($2)==s{print $1; exit}'; }
+
+do_list() {
+  echo "Attached HF+ receivers (SoapySDR):"
+  local any=0 s n
+  for s in $(plugged_serials); do
+    any=1; n=$(dev_by_serial "$s"); echo "  $s  ${n:-(not registered - use: skim add NAME)}"
+  done
+  [ $any = 1 ] || echo "  none found"
+  echo; echo "Known receivers ($CONF/devices.conf):"
+  conf_lines "$CONF/devices.conf" | awk '{printf "  %-8s %s  ppm %s\n",$1,$2,$3}'
+  echo; echo "Bands ($CONF/bands.conf):"
+  conf_lines "$CONF/bands.conf" | awk '{printf "  %-5s %-8s center %-10s rate %-7s range %-14s excl %s\n",$1,$2,$3,$4,$5,$6}'
+  exit 0
+}
+
+do_add() {
+  local name=${1:-} serial=${2:-} s cand=()
+  [ -n "$name" ] || die "usage: skim add NAME [SERIAL]"
+  case $name in *[!A-Za-z0-9_-]*|list|add|update|normal|contest|help) die "invalid or reserved name '$name'";; esac
+  case $name in [0-9]*m) die "invalid or reserved name '$name' (looks like a band)";; esac
+  [ -z "$(dev_field "$name" 2)" ] || die "$name already exists in $CONF/devices.conf"
+  if [ -z "$serial" ]; then
+    for s in $(plugged_serials); do [ -z "$(dev_by_serial "$s")" ] && cand+=("$s"); done
+    [ ${#cand[@]} -eq 1 ] || die "need exactly one attached, unregistered receiver (found ${#cand[@]}); give the serial: skim add NAME SERIAL"
+    serial=${cand[0]}
+  fi
+  printf '%s\t%s\t-\n' "$name" "$(echo "$serial" | tr 'A-F' 'a-f')" >>"$CONF/devices.conf"
+  echo "added $name ($serial); clock error unknown - run: skim-cal $name"
+  exit 0
+}
+
+do_update() {
+  [ -d "$OSDIR/.git" ] || die "$OSDIR is not a git checkout"
+  git -C "$OSDIR" checkout -q -- openskimmer/sdr/soapy.py   # drop our patch, re-applied below
+  git -C "$OSDIR" pull --ff-only || echo "git pull failed, continuing with the current version"
+  python3 -I "$CONF/patch_soapy.py" "$OSDIR/openskimmer/sdr/soapy.py"
+  "$OSDIR/.venv/bin/pip" install --no-cache-dir -q -e "$OSDIR"
+  curl -fsSL -o "$OSDIR/MASTER.SCP.new" https://www.supercheckpartial.com/MASTER.SCP \
+    && mv "$OSDIR/MASTER.SCP.new" "$OSDIR/MASTER.SCP" || echo "MASTER.SCP: download failed"
+  curl -fsSL -o "$OSDIR/patt3ch.lst.new" https://data.reversebeacon.net/downloads/patt3ch/patt3ch.lst \
+    && mv "$OSDIR/patt3ch.lst.new" "$OSDIR/patt3ch.lst" || echo "patt3ch.lst: download failed"
+  rm -f "$OSDIR"/*.new
+  exit 0
+}
+
+# ------------------------------------------------------------ arguments
+BAND=""; MODE=normal; DEV=""; EXTRA=()
+n0=${0##*/}
+case $n0 in skim-*) BAND=${n0#skim-} ;; esac
+while [ $# -gt 0 ]; do
+  a=$1; shift
+  case $a in
+    list|--list) do_list ;;
+    add)         do_add "$@" ;;
+    update)      do_update ;;
+    -h|--help|help) usage; exit 0 ;;
+    normal|contest) MODE=$a ;;
+    160m|80m|60m|40m|30m|20m|17m|15m|12m|10m|6m|2m) BAND=$a ;;
+    -*) EXTRA=("$a" "$@"); break ;;
+    *)  if [ -n "$(dev_field "$a" 2)" ]; then DEV=$a
+        else die "unknown argument '$a' (band? receiver? see: skim list)"; fi ;;
+  esac
+done
+[ -n "$BAND" ] || die "no band given. Example: skim 40m   (help: skim --help)"
+[ -x "$OSDIR/.venv/bin/openskimmer" ] || die "OpenSkimmer not found in $OSDIR - run install.sh"
+
+MY_CALL=""; MAX_CHANNELS=250
+[ -r "$CONF/skim.conf" ] && . "$CONF/skim.conf"
+MY_CALL=${SKIM_CALL:-$MY_CALL}
+MAX_CHANNELS=${SKIM_MAX_CHANNELS:-$MAX_CHANNELS}
+
+# ------------------------------------------------------------ band
+row=$(conf_lines "$CONF/bands.conf" | awk -v b="$BAND" -v m="$MODE" '$1==b&&$2==m{print; exit}')
+if [ -z "$row" ] && [ "$MODE" = contest ]; then
+  row=$(conf_lines "$CONF/bands.conf" | awk -v b="$BAND" '$1==b&&$2=="normal"{print; exit}')
+fi
+[ -n "$row" ] || die "band $BAND is not in $CONF/bands.conf"
+read -r _ _ CENTER RATE RANGE EXCL <<<"$row"
+
+# ------------------------------------------------------------ receiver
+PLUGGED=$(plugged_serials)
+if [ -n "$DEV" ]; then
+  SERIAL=$(dev_field "$DEV" 2 | tr 'A-F' 'a-f')
+  grep -qx "$SERIAL" <<<"$PLUGGED" || die "$DEV (serial $SERIAL) is not attached. Attached: ${PLUGGED:-none}"
+else
+  cnt=$(grep -c . <<<"$PLUGGED")
+  [ "$cnt" -ge 1 ] || die "no Airspy HF+ found (SoapySDRUtil --find=\"driver=airspyhf\")"
+  [ "$cnt" -eq 1 ] || die "several HF+ attached, please name one: $(for s in $PLUGGED; do echo -n "$(dev_by_serial "$s") "; done)"
+  SERIAL=$PLUGGED
+  DEV=$(dev_by_serial "$SERIAL"); DEV=${DEV:-unregistered}
+fi
+PPM=$(dev_field "$DEV" 3); DEVCALL=$(dev_field "$DEV" 4)
+MY_CALL=${DEVCALL:-$MY_CALL}
+if [ -z "$MY_CALL" ] || [ "$MY_CALL" = N0CALL ]; then
+  die "no callsign set. Edit $CONF/skim.conf (MY_CALL=...) or export SKIM_CALL"
+fi
+if [ -z "$PPM" ] || [ "$PPM" = "-" ]; then
+  echo "skim: WARNING: $DEV is not calibrated (clock error unknown, using 0). Run: skim-cal $DEV" >&2
+  PPM=0
+fi
+OFFSET=$(awk -v p="$PPM" -v c="$CENTER" 'BEGIN{v=-p*c/1e6; printf "%d", (v<0 ? v-0.5 : v+0.5)}')
+
+# ------------------------------------------------------------ range
+if [ "$RANGE" != "-" ] && [ -z "${SKIM_RANGE_KHZ+x}" ];   then export SKIM_RANGE_KHZ=$RANGE; fi
+if [ "$EXCL"  != "-" ] && [ -z "${SKIM_EXCLUDE_KHZ+x}" ]; then export SKIM_EXCLUDE_KHZ=$EXCL; fi
+
+echo "skim: $BAND $MODE | receiver $DEV ($SERIAL) | ppm $PPM -> offset ${OFFSET} Hz | ${SKIM_RANGE_KHZ:-all} kHz excl ${SKIM_EXCLUDE_KHZ:--} | $MY_CALL" >&2
+
+cd "$OSDIR" || exit 1
+exec .venv/bin/openskimmer \
+  --band "soapy@driver=airspyhf,serial=$SERIAL:$CENTER/$RATE" \
+  --band-offset "$CENTER=$OFFSET" \
+  --my-call "$MY_CALL" --scp MASTER.SCP --patterns patt3ch.lst \
+  --max-channels "$MAX_CHANNELS" "${EXTRA[@]}"

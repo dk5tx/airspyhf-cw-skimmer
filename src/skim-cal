@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# skim-cal RECEIVER [--now] [--wwv-only]
+#   Measures the clock error (ppm) of an HF+ with WWV (10 MHz) and RWM (9996 kHz)
+#   and stores it in skim.d/devices.conf. Takes about one minute.
+#   Needs: an antenna that hears 10 MHz, and no skimmer running on that receiver.
+#   --now        do not wait for RWM's carrier phase
+#   --wwv-only   evaluate WWV only
+set -u
+SELF=$(readlink -f "${BASH_SOURCE[0]}"); BIN=${SELF%/*}; CONF=$BIN/skim.d; OSDIR=$BIN/openskimmer
+die() { echo "skim-cal: $*" >&2; exit 1; }
+DEV=""; NOW=0; CALARGS=()
+for a in "$@"; do
+  case $a in
+    --now) NOW=1 ;;
+    --wwv-only) CALARGS+=(--wwv-only) ;;
+    -h|--help) sed -n '3,8p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) DEV=$a ;;
+  esac
+done
+[ -n "$DEV" ] || die "name a receiver, e.g. skim-cal rx1 (known: $(grep -Ev '^[[:space:]]*(#|$)' "$CONF/devices.conf" | awk '{printf $1" "}'))"
+SERIAL=$(grep -Ev '^[[:space:]]*(#|$)' "$CONF/devices.conf" | awk -v n="$DEV" '$1==n{print tolower($2)}')
+[ -n "$SERIAL" ] || die "receiver '$DEV' is not in $CONF/devices.conf (see: skim add)"
+SoapySDRUtil --find="driver=airspyhf" 2>/dev/null | tr 'A-F' 'a-f' | grep -q "serial = $SERIAL" \
+  || die "$DEV ($SERIAL) is not attached"
+pgrep -f "[.]venv/bin/openskimmer" >/dev/null && die "an openskimmer is still running - stop it first (it would hold the receiver)"
+
+if [ $NOW = 0 ]; then   # RWM sends its carrier only in :00-:08 and :30-:38 -> start at second :20/:50
+  echo "Waiting for second :20/:50 so that an RWM carrier phase falls into the recording ..."
+  while :; do s=$((10#$(date +%S))); [ $((s % 30)) -eq 20 ] && break; sleep 0.2; done
+fi
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/skim-cal.XXXXXX"); trap 'rm -rf "$TMP"' EXIT
+echo "Recording 45 s of I/Q (center 10002 kHz) ..."
+( cd "$OSDIR" && timeout -s INT 50 .venv/bin/openskimmer \
+    --band "soapy@driver=airspyhf,serial=$SERIAL:10002000/192000" \
+    --my-call N0CALL --web-port 0 --record "$TMP/cal.c64" >"$TMP/os.log" 2>&1 )
+[ -s "$TMP/cal.c64" ] || { tail -5 "$TMP/os.log" >&2; die "no recording was produced"; }
+OUT=$("$OSDIR/.venv/bin/python" -I "$CONF/cal.py" "$TMP/cal.c64" "${CALARGS[@]}")
+RC=$?
+echo "$OUT" | grep '^RESULT'
+[ $RC = 0 ] || exit $RC
+PPM=$(echo "$OUT" | sed -n 's/^RESULT ppm=\([-0-9.]*\).*/\1/p')
+[ -n "$PPM" ] || die "no result"
+awk -v n="$DEV" -v p="$PPM" 'BEGIN{OFS="\t"} /^[[:space:]]*(#|$)/{print; next} $1==n{$3=p} {print}' \
+  "$CONF/devices.conf" >"$TMP/dev.new" && cat "$TMP/dev.new" >"$CONF/devices.conf"
+echo "$(date -u +%FT%TZ) $DEV $SERIAL $OUT" >>"$CONF/cal.log"
+echo "OK: $DEV has $PPM ppm (stored in $CONF/devices.conf)"
